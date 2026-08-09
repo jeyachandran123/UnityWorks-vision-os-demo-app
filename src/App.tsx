@@ -4,6 +4,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { theme } from './theme/theme';
 import { PlatformProvider } from './api/provider';
 import { Shell, type PageId } from './layout/Shell';
+import { LiveSummary } from './pages/LiveSummary';
+import { FrameByFrame } from './pages/FrameByFrame';
 import { Dashboard } from './pages/Dashboard';
 import { LiveCameras } from './pages/LiveCameras';
 import { Objects } from './pages/Objects';
@@ -29,6 +31,10 @@ const queryClient = new QueryClient({
 
 function Router({ page }: { page: PageId }) {
   switch (page) {
+    case 'summary':
+      return <LiveSummary />;
+    case 'narration':
+      return <FrameByFrame />;
     case 'cameras':
       return <LiveCameras />;
     case 'objects':
@@ -53,10 +59,15 @@ function Router({ page }: { page: PageId }) {
 }
 
 export default function App() {
+  // Opens on the plain-language summary rather than the Dashboard: the first
+  // screen anyone sees should be readable by whoever is being shown the
+  // product, and the engineering views are one click away for the people who
+  // want them.
+  //
   // `#invoice` opens the extraction check directly, so it is reachable without
   // the Vision OS platform service running behind the dashboard.
   const [page, setPage] = useState<PageId>(
-    window.location.hash === '#invoice' ? 'invoice' : 'dashboard',
+    window.location.hash === '#invoice' ? 'invoice' : 'summary',
   );
 
   return (

@@ -21,6 +21,8 @@ import type {
   MediaAsset,
   MetricsResponse,
   ModelPanel,
+  NarrationFeed,
+  NarrationStatus,
   Observation,
   ObjectView,
   SessionDescription,
@@ -184,6 +186,24 @@ export class VisionOsClient {
     return this.post(`/sessions/${encodeURIComponent(id)}/transport`, { action, ...detail });
   }
 
+  /**
+   * Close a session and release the Vision OS instance behind it.
+   *
+   * Note what this is not. It deletes a *replay session* — a video source and
+   * the platform instance reading it — and touches no observation, no object
+   * and no attribute. The Observation API still exposes nothing to write; a
+   * session is the harness's own transport lifecycle, and the counterpart of
+   * `createSession` rather than an exception to the rule above.
+   *
+   * It exists because the alternative is worse: each session holds its own
+   * booted platform, and understanding is served by one model instance. Left
+   * open, abandoned sessions go on asking that model, and a new session queues
+   * behind every one of them until its calls time out.
+   */
+  closeSession(id: string): Promise<unknown> {
+    return this.call(`/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
   frameLedger(id: string, limit = 2000): Promise<{ entries: FrameLedgerEntry[]; total: number }> {
     return this.get(`/sessions/${encodeURIComponent(id)}/frames${qs({ limit })}`);
   }
@@ -191,6 +211,22 @@ export class VisionOsClient {
   /** Off unless the deployment enables it. Requires a declared purpose. */
   frameUrl(id: string, index: number, purpose: string): string {
     return `${this.baseUrl}/api/v1/sessions/${encodeURIComponent(id)}/frames/${index}${qs({ purpose })}`;
+  }
+
+  // --- frame narration ------------------------------------------------------ //
+  //
+  // Deliberately grouped apart from the Observation API below. These sentences
+  // are the vision model describing a whole frame, not something Vision OS
+  // recorded — they carry no confidence, no evidence and no provenance, and the
+  // platform does not vouch for them. Mixing the two calls in one section would
+  // be the first step toward mixing them on screen.
+
+  startNarration(sessionId: string, body: { stride?: number; max_frames?: number } = {}) {
+    return this.post<NarrationStatus>(`/sessions/${encodeURIComponent(sessionId)}/narration`, body);
+  }
+
+  narration(sessionId: string): Promise<NarrationFeed> {
+    return this.get(`/sessions/${encodeURIComponent(sessionId)}/narration`);
   }
 
   // --- the Observation API ------------------------------------------------- //

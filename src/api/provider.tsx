@@ -143,6 +143,38 @@ export function PlatformProvider({
     };
   }, [sessionId, buffer]);
 
+  // Adopt a session that is already running, once, on load.
+  //
+  // Sessions live on the harness, not in this page, so a refresh used to leave
+  // a perfectly good session running with nothing pointed at it — the operator
+  // saw an empty app, pressed Start, and paid the several-minute boot again
+  // while the orphan carried on consuming the model. Reconnecting is what a
+  // viewer of a running system should do, and it is what makes an accidental
+  // refresh mid-demo a non-event.
+  //
+  // The newest session wins: if several are somehow open, the one most recently
+  // asked for is the one whoever is watching meant to see.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { sessions } = await client.listSessions();
+        const live = [...sessions]
+          .filter((held) => held.state !== 'ended' && held.state !== 'failed')
+          .sort((a, b) => (a.created_at_ns ?? 0) - (b.created_at_ns ?? 0))
+          .pop();
+        if (!cancelled && live) {
+          setSessionId((current) => current ?? live.session_id);
+        }
+      } catch {
+        /* nothing running, or no platform — both are states the UI renders */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
+
   // Keep the session description fresh: the transport state, frame index and
   // channel counts drive most of the chrome.
   useEffect(() => {

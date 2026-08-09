@@ -10,7 +10,7 @@
  * the numbers are measured rather than claimed.
  */
 
-import { Box, Card, CardContent, Chip, Divider, Stack, Tooltip, Typography } from '@mui/material';
+import { Alert, Box, Card, CardContent, Chip, Divider, Stack, Tooltip, Typography } from '@mui/material';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForwardRounded';
 import { usePlatform } from '../api/provider';
 import { useEconomy, useModel, useVisionState } from '../api/hooks';
@@ -49,37 +49,70 @@ export function Dashboard() {
   const insights = deriveInsights(objects, vertical);
   const reduction = economy.data?.reduction_factor ?? null;
 
+  // A read that failed is not a reading of zero. These cards used to render
+  // `?? 0` on error, which drew "the platform could not be asked" and "the
+  // platform saw nothing" identically — the exact conflation this application
+  // exists to refuse. An em dash says the number is missing; the banner below
+  // says why.
+  //
+  // `&& !data` matters as much as the error does. React Query holds the last
+  // successful answer through a failed refresh, so keying off the error alone
+  // blanked every card the moment one poll missed and refilled them on the
+  // next — a dashboard that flickered between numbers and dashes while the
+  // platform was fine.
+  const stateFailed = Boolean(state.error && !state.data);
+  const economyFailed = Boolean(economy.error && !economy.data);
+  const modelFailed = Boolean(model.error && !model.data);
+  const dash = '—';
+
+  // The platform is being asked and is answering; the video simply is not
+  // moving. Every figure below is then a true zero, and an operator reading a
+  // motionless dashboard deserves to be told that rather than left to guess.
+  const stalled = Boolean(session && !session.playing && session.frame_index === 0);
+
   return (
     <Stack spacing={3}>
+      {session?.state === 'failed' ? (
+        <Unavailable what="Session" reason={session.error ?? 'The platform reported the session failed.'} />
+      ) : stalled ? (
+        <Alert severity="info" variant="outlined">
+          <strong>The session is open but no frames have been processed.</strong> Every figure on
+          this page is therefore a true zero rather than a measurement. Press ▶ in the header to
+          advance the video.
+        </Alert>
+      ) : null}
+
+      {stateFailed ? <Unavailable what="Vision State" reason={String(state.error)} /> : null}
+
       {/* --- headline metrics ------------------------------------------------ */}
       <Stack direction="row" spacing={1.5} flexWrap="wrap" useFlexGap>
         <MetricCard
           label="Objects tracked"
-          value={objects.length}
+          value={stateFailed ? dash : objects.length}
           sub={<Provenance source="Vision State projection" />}
         />
         <MetricCard
           label="With attributes"
-          value={attributed.length}
-          tone={attributed.length > 0 ? 'good' : 'default'}
+          value={stateFailed ? dash : attributed.length}
+          tone={!stateFailed && attributed.length > 0 ? 'good' : 'default'}
           sub={<Provenance source="Understanding Engine" />}
         />
         <MetricCard
           label="Frames analysed"
-          value={session?.frame_index ?? 0}
+          value={session ? session.frame_index : dash}
           sub={<Provenance source="Acquisition" />}
         />
         <MetricCard
           label="Model calls"
-          value={economy.data?.actual_model_calls ?? 0}
+          value={economyFailed ? dash : (economy.data?.actual_model_calls ?? 0)}
           tone="good"
           hint="Calls the platform actually spent on video. Binding-time conformance probes are excluded."
           sub={<Provenance source="P15 adapter" />}
         />
         <MetricCard
           label="Model latency p50"
-          value={((model.data?.inference?.p50_latency_ms ?? 0) / 1000).toFixed(1)}
-          unit="s"
+          value={modelFailed ? dash : ((model.data?.inference?.p50_latency_ms ?? 0) / 1000).toFixed(1)}
+          unit={modelFailed ? undefined : 's'}
           sub={<Provenance source="Qwen adapter timing" />}
         />
       </Stack>
@@ -99,7 +132,9 @@ export function Dashboard() {
             Why not just send every frame to the model?
           </SectionTitle>
 
-          {economy.data?.available === false ? (
+          {economyFailed ? (
+            <Unavailable what="Economy report" reason={String(economy.error)} />
+          ) : economy.data?.available === false ? (
             <Unavailable what="Economy report" reason={economy.data.reason} />
           ) : (
             <>

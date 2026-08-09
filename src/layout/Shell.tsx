@@ -29,6 +29,8 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
+import SummarizeIcon from '@mui/icons-material/AutoAwesomeOutlined';
+import NarrationIcon from '@mui/icons-material/SubtitlesOutlined';
 import DashboardIcon from '@mui/icons-material/SpaceDashboardOutlined';
 import VideocamIcon from '@mui/icons-material/VideocamOutlined';
 import PeopleIcon from '@mui/icons-material/GroupsOutlined';
@@ -43,10 +45,13 @@ import PlayIcon from '@mui/icons-material/PlayArrowRounded';
 import PauseIcon from '@mui/icons-material/PauseRounded';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { usePlatform } from '../api/provider';
+import { useHealth, useModel } from '../api/hooks';
 import { isUnreachable } from '../api/client';
 import { brand, mono, observability } from '../theme/theme';
 
 export type PageId =
+  | 'summary'
+  | 'narration'
   | 'dashboard'
   | 'cameras'
   | 'objects'
@@ -59,6 +64,11 @@ export type PageId =
   | 'invoice';
 
 export const PAGES: Array<{ id: PageId; label: string; icon: JSX.Element; group: string }> = [
+  // First, and in its own group. Everything below it answers an engineer's
+  // question; this one answers "what is happening?" for whoever is being shown
+  // the product.
+  { id: 'summary', label: 'Live Summary', icon: <SummarizeIcon />, group: 'What is happening' },
+  { id: 'narration', label: 'Frame by Frame', icon: <NarrationIcon />, group: 'What is happening' },
   { id: 'dashboard', label: 'Dashboard', icon: <DashboardIcon />, group: 'Overview' },
   { id: 'cameras', label: 'Live Cameras', icon: <VideocamIcon />, group: 'Overview' },
   { id: 'objects', label: 'Objects', icon: <PeopleIcon />, group: 'Perception' },
@@ -82,22 +92,29 @@ export function Shell({
   onNavigate: (page: PageId) => void;
   children: React.ReactNode;
 }) {
-  const { client, sessionId, session, streamStatus } = usePlatform();
-  const health = useQuery({ queryKey: ['health'], queryFn: () => client.health(), refetchInterval: 5000, retry: false });
-  const model = useQuery({
-    queryKey: ['model', sessionId],
-    queryFn: () => client.model(sessionId ?? undefined),
-    enabled: Boolean(sessionId),
-    refetchInterval: 4000,
-    retry: false,
-  });
+  const { sessionId, session, streamStatus } = usePlatform();
+  // The shared hooks rather than private copies of them. These were declared
+  // again here with their own intervals — same cache keys, different schedules,
+  // so the shell quietly set the polling rate for the whole application and
+  // tuning it in one place had no effect.
+  const health = useHealth();
+  const model = useModel();
 
   const groups = Array.from(new Set(PAGES.map((p) => p.group)));
 
   // The invoice page talks to the Atlas backend, not to Vision OS, so it stays
   // usable when the platform service is not running — which is the normal case
   // when someone is only checking document extraction.
-  if (isUnreachable(health.error) && page !== 'invoice') {
+  //
+  // Two consecutive failures, not one. This replaces the entire application
+  // with a full-screen notice, and doing that on a single missed poll meant one
+  // hiccup blanked the screen and the next poll five seconds later brought it
+  // back — the most violent flicker in the product, and the one that made
+  // everything else look broken. A platform that is genuinely down fails every
+  // poll and still trips this within about ten seconds.
+  const platformDown =
+    isUnreachable(health.error) && (health.data === undefined || health.failureCount >= 2);
+  if (platformDown && page !== 'invoice') {
     return <PlatformDown />;
   }
 
@@ -198,6 +215,22 @@ export function Shell({
             {session ? (
               <Chip size="small" variant="outlined" label={`frame ${session.frame_index}/${session.frame_count}`} />
             ) : null}
+            {/* A stopped session produces genuine zeros everywhere. Saying so in
+                the chrome is cheaper than letting an operator read a still
+                dashboard as a broken one. */}
+            {session && !session.playing ? (
+              <Tooltip arrow title="The video is not advancing. Every figure on screen is a true zero, not a measurement.">
+                <Chip
+                  size="small"
+                  label={session.state === 'ready' ? 'not started' : session.state}
+                  sx={{
+                    bgcolor: 'transparent',
+                    border: `1px solid ${observability.degraded}`,
+                    color: observability.degraded,
+                  }}
+                />
+              </Tooltip>
+            ) : null}
           </Toolbar>
         </AppBar>
 
@@ -227,11 +260,64 @@ function SessionControl() {
 
   const media = useQuery({ queryKey: ['media'], queryFn: () => client.listMedia(), retry: false });
   const assets = media.data?.media ?? [];
-  const selected = mediaId || assets.find((a) => a.usable)?.media_id || '';
+  // Default to real footage, not the synthetic target.
+  //
+  // The synthetic source is first in the library and was therefore what the
+  // picker chose for anyone who pressed Start without opening the dropdown. It
+  // is a 96×96 generated pattern built to exercise the pipeline deterministically
+  // — invaluable for a contract test, and the least persuasive thing in the
+  // building to put in front of someone asking what the product does.
+  const selected =
+    mediaId ||
+    assets.find((a) => a.usable && a.kind === 'video_file')?.media_id ||
+    assets.find((a) => a.usable)?.media_id ||
+    '';
 
   const open = useMutation({
-    mutationFn: () =>
-      client.createSession({ media_id: selected, target_fps: 6, autostart: false, max_frames: 120 }),
+    mutationFn: async () => {
+      // Close every open session, not merely the one this page knows about.
+      //
+      // Sessions outlive the browser. A reload — or Vite pushing an update
+      // during development — resets `sessionId` to null while the session it
+      // named keeps running on the harness, and the next Start then strands it.
+      // Each stranded session holds its own booted platform and goes on asking
+      // the one model instance, so the new session queues behind every ghost
+      // until nothing can boot at all. That arrives on screen as a summary that
+      // never fills in, indistinguishable from a broken product.
+      //
+      // This application shows one camera at a time, so "one session" is a
+      // truth it can simply enforce.
+      //
+      // Waited on rather than fired and forgotten, because the teardown is the
+      // point: the new session should boot into a machine the old ones have
+      // already let go of. The platform answers only once an instance is down,
+      // which on a loaded box outlasts a minute — so the wait is bounded and
+      // Start proceeds either way.
+      const open = await client.listSessions().catch(() => ({ sessions: [] }));
+      if (open.sessions.length) {
+        await Promise.race([
+          Promise.all(
+            open.sessions.map((held) => client.closeSession(held.session_id).catch(() => undefined)),
+          ),
+          new Promise((resolve) => setTimeout(resolve, 25_000)),
+        ]);
+      }
+
+      const created = await client.createSession({
+        media_id: selected,
+        target_fps: 6,
+        autostart: true,
+        max_frames: 120,
+      });
+
+      // `autostart` is a request to the platform, not a guarantee from it. A
+      // session that comes back paused sits at frame 0 forever, and every
+      // reading taken from it — objects, coverage, economy, latency — is a
+      // truthful zero that looks exactly like a fault. So the button labelled
+      // Start makes sure the thing it named actually started.
+      if (created.playing) return created;
+      return client.transport(created.session_id, 'play').catch(() => created);
+    },
     onSuccess: (created) => {
       setSessionId(created.session_id);
       queryClient.invalidateQueries();
@@ -280,14 +366,25 @@ function SessionControl() {
         ))}
       </TextField>
 
-      <Button
-        size="small"
-        variant="contained"
-        disabled={!selected || open.isPending}
-        onClick={() => open.mutate()}
+      <Tooltip
+        arrow
+        title={
+          open.isPending
+            ? 'Opening a session runs the P15 conformance gate, which makes real inference calls to prove the adapter never fabricates. On CPU that is several minutes. Do not press again — a second session competes for the same model.'
+            : 'Open a session on the selected footage and begin playback'
+        }
       >
-        {open.isPending ? 'Starting…' : 'Start'}
-      </Button>
+        <span>
+          <Button
+            size="small"
+            variant="contained"
+            disabled={!selected || open.isPending}
+            onClick={() => open.mutate()}
+          >
+            {open.isPending ? 'Starting…' : 'Start'}
+          </Button>
+        </span>
+      </Tooltip>
 
       {sessionId ? (
         <Tooltip title={session?.playing ? 'Pause' : 'Resume'} arrow>

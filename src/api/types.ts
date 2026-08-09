@@ -74,6 +74,21 @@ export interface CoverageSummary {
   fully_observable?: boolean;
 }
 
+/**
+ * What this deployment is able to report at all.
+ *
+ * The honest answer to "why is there no bus in the summary?" — a class outside
+ * `producible_classes` is one the platform was never configured to recognise,
+ * and its absence from a result says nothing about whether it was there.
+ */
+export interface CapabilitySummary {
+  taxonomy_version?: string;
+  producible_classes: string[];
+  producible_attributes: string[];
+  gaps?: unknown[];
+  models_in_use?: unknown[];
+}
+
 export interface StateResult {
   objects: ObjectView[];
   snapshot: {
@@ -85,6 +100,7 @@ export interface StateResult {
   };
   /** Required. Accompanies every state answer, unconditionally. */
   coverage: CoverageSummary;
+  capabilities?: CapabilitySummary;
   complete?: boolean;
 }
 
@@ -152,6 +168,8 @@ export interface SessionDescription {
   target_fps: number;
   frame_count: number;
   frame_index: number;
+  /** Set by the platform when the session was opened. Orders "newest first". */
+  created_at_ns?: Nanos;
   playing: boolean;
   speed: number;
   exhausted: boolean;
@@ -216,6 +234,46 @@ export interface EconomyReport {
   mechanisms: Array<{ name: string; detail: string }>;
   observations_built: number;
   note: string;
+}
+
+// --- frame narration ------------------------------------------------------ //
+
+/**
+ * One frame, described by the vision model in a sentence.
+ *
+ * **Not an observation.** No confidence, no evidence reference, no provenance,
+ * and no replay guarantee — the platform did not produce it and does not vouch
+ * for it. `is_observation` is carried on every record rather than assumed from
+ * context, because these get rendered next to real observations and the
+ * difference has to survive the trip.
+ */
+export interface NarrationRecord {
+  frame_index: number;
+  text: string;
+  available: boolean;
+  reason?: string;
+  latency_ms: number;
+  model?: string;
+  kind: 'model_narration';
+  is_observation: false;
+}
+
+export interface NarrationFeed {
+  available: boolean;
+  running: boolean;
+  started: boolean;
+  stride?: number;
+  records: NarrationRecord[];
+  note?: string;
+}
+
+export interface NarrationStatus {
+  available: boolean;
+  reason?: string;
+  session_id?: string;
+  stride?: number;
+  max_frames?: number;
+  running?: boolean;
 }
 
 // --- stream --------------------------------------------------------------- //
