@@ -48,18 +48,22 @@ import { useQuery } from '@tanstack/react-query';
 import { usePlatform } from '../api/provider';
 import { useHealth, useObservations } from '../api/hooks';
 import {
+  collectFrameEvidence,
   countByClass,
   describeDetections,
   describeFrameRef,
+  describeFrameStory,
   describeUnderstanding,
   deriveHighlights,
   formatClock,
   groupObservationsByFrame,
   humanClass,
   titleCase,
+  type FrameEvidence,
   type FrameGroup,
   type FrameObject,
 } from '../insights/frames';
+import type { CropIndex } from '../api/types';
 import { EmptyState, Loading, Mono, SectionTitle, Unavailable } from '../components/primitives';
 import { brand, mono, observability } from '../theme/theme';
 
@@ -216,22 +220,15 @@ export function FrameByFrame() {
         <FrameCard
           group={focused}
           fps={fps}
-          cropUrlFor={(objectId) => {
-            if (!objectId || !confirmedPurpose) return null;
-            const held = cropIndex.data?.by_object?.[objectId];
-            if (!held?.length) return null;
-            // The crop taken on this frame when there is one, otherwise the most
-            // recent — an object is examined once per freshness window, so the
-            // image that produced its attributes is usually an earlier frame's.
-            const match =
-              held.find((crop) => crop.frame_seq === focused.frameIndex) ??
-              held[held.length - 1]!;
-            return client.cropUrl(match.crop_id, confirmedPurpose, sessionId);
-          }}
-          cropsRefused={Boolean(
-            (cropIndex.data?.refused_ephemeral ?? 0) > 0 ||
-              (cropIndex.data?.refused_never_persist ?? 0) > 0,
-          )}
+          // Which object maps to which retained image is decided by
+          // `collectFrameEvidence`, in one place and under test. This supplies
+          // only the address of a crop the sink already wrote — and refuses to
+          // build one until a purpose has been declared, exactly as frame
+          // access does.
+          cropIndex={cropIndex.data ?? null}
+          cropUrl={(cropId) =>
+            confirmedPurpose ? client.cropUrl(cropId, confirmedPurpose, sessionId) : null
+          }
           frameUrl={
             framesServed && confirmedPurpose && focused.frameIndex !== null
               ? client.frameUrl(sessionId, focused.frameIndex, confirmedPurpose)
@@ -260,8 +257,8 @@ function FrameCard({
   group,
   fps,
   frameUrl,
-  cropUrlFor,
-  cropsRefused,
+  cropIndex,
+  cropUrl,
   highlights,
   selectedObject,
   onSelectObject,
@@ -271,8 +268,8 @@ function FrameCard({
   group: FrameGroup;
   fps: number;
   frameUrl: string | null;
-  cropUrlFor: (objectId: string | null) => string | null;
-  cropsRefused: boolean;
+  cropIndex: CropIndex | null;
+  cropUrl: (cropId: string) => string | null;
   highlights: ReturnType<typeof deriveHighlights>;
   selectedObject: string | null;
   onSelectObject: (id: string | null) => void;
@@ -281,8 +278,13 @@ function FrameCard({
 }) {
   const counts = countByClass(group);
   const summary = describeDetections(group);
+  const story = describeFrameStory(group);
+  // One entry per object in the frame, always — an object with no retained
+  // image appears with the platform's reason rather than dropping out.
+  const evidence = collectFrameEvidence(group, cropIndex);
   const understood = group.objects.filter((object) => object.attributes.length > 0);
   const selected = group.objects.find((object) => object.objectId === selectedObject) ?? null;
+  const selectedEvidence = evidence.find((entry) => entry.object === selected) ?? null;
 
   return (
     <Card>
@@ -391,6 +393,27 @@ function FrameCard({
           )}
         </Stack>
 
+        {/* --- frame story ----------------------------------------------------- */}
+        {/*
+          The frame in a sentence, for someone who will never read an
+          observation. Assembled by `describeFrameStory` from the same counts and
+          recorded attribute values shown elsewhere on this card — there is no
+          model call behind it, and the clauses it rests on are listed under
+          Traceability so the sentence can be checked rather than believed.
+        */}
+        <Typography variant="caption" sx={{ display: 'block', mt: 2.5, mb: 0.75, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+          Frame story
+        </Typography>
+        <Typography sx={{ fontSize: '1.15rem', lineHeight: 1.55, fontWeight: 500 }}>
+          {story.text}
+        </Typography>
+        {story.basis === 'presence' && group.objects.length > 0 ? (
+          <Typography variant="caption" sx={{ display: 'block', mt: 0.5, fontStyle: 'italic' }}>
+            No activity was recorded for these objects, so the story reports only what was
+            detected.
+          </Typography>
+        ) : null}
+
         {/* --- what happened -------------------------------------------------- */}
         <Typography variant="caption" sx={{ display: 'block', mt: 2.5, mb: 0.75, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
           What happened
@@ -440,57 +463,42 @@ function FrameCard({
           <ObjectDetail
             object={selected}
             frameUrl={frameUrl}
-            cropUrl={cropUrlFor(selected.objectId)}
-            cropsRefused={cropsRefused}
+            evidence={selectedEvidence}
+            cropUrl={cropUrl}
           />
         ) : null}
 
         {/* --- evidence ---------------------------------------------------------- */}
-        {(() => {
-          const withCrops = group.objects
-            .map((object) => ({ object, url: cropUrlFor(object.objectId) }))
-            .filter((entry): entry is { object: FrameObject; url: string } => Boolean(entry.url));
-          if (!withCrops.length) return null;
-          return (
-            <>
-              <Typography
-                variant="caption"
-                sx={{ display: 'block', mt: 2.5, mb: 1, textTransform: 'uppercase', letterSpacing: '0.08em' }}
-              >
-                Evidence — the images the model was given
-              </Typography>
-              <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                {withCrops.map(({ object, url }) => (
-                  <Box
-                    key={object.objectId ?? object.label}
-                    onClick={() => onSelectObject(object.objectId)}
-                    sx={{ cursor: 'pointer', textAlign: 'center' }}
-                  >
-                    <Box
-                      component="img"
-                      src={url}
-                      alt={object.label}
-                      sx={{
-                        width: 84,
-                        height: 84,
-                        objectFit: 'contain',
-                        borderRadius: 1,
-                        bgcolor: '#05070d',
-                        border: `1px solid ${
-                          object.objectId === selectedObject ? brand.accent : brand.border
-                        }`,
-                        display: 'block',
-                      }}
-                    />
-                    <Typography variant="caption" sx={{ fontSize: '0.6rem' }}>
-                      {object.label}
-                    </Typography>
-                  </Box>
-                ))}
-              </Stack>
-            </>
-          );
-        })()}
+        {/*
+          Every object in the frame, not every object that happens to have a
+          picture. An object examined by the model shows the crop it was given;
+          an object nothing asked about shows the frame at its detected position
+          and says why no crop exists. Filtering this list to the objects with
+          images is what previously made a four-object frame look like a
+          two-object frame.
+        */}
+        {evidence.length > 0 ? (
+          <>
+            <Typography
+              variant="caption"
+              sx={{ display: 'block', mt: 2.5, mb: 1, textTransform: 'uppercase', letterSpacing: '0.08em' }}
+            >
+              Evidence — every object in this frame
+            </Typography>
+            <Stack direction="row" spacing={1.25} flexWrap="wrap" useFlexGap>
+              {evidence.map((entry) => (
+                <EvidenceTile
+                  key={entry.object.objectId ?? entry.object.label}
+                  entry={entry}
+                  url={entry.cropId ? cropUrl(entry.cropId) : null}
+                  frameUrl={frameUrl}
+                  selected={entry.object.objectId === selectedObject}
+                  onSelect={() => onSelectObject(entry.object.objectId)}
+                />
+              ))}
+            </Stack>
+          </>
+        ) : null}
 
         {/* --- traceability ----------------------------------------------------- */}
         <Link
@@ -510,6 +518,56 @@ function FrameCard({
               <Trace label="observations" value={String(group.observations.length)} />
               <Trace label="capture" value={`${(group.captureNs / 1e9).toFixed(3)} s`} />
               <Trace label="sampled at" value={`${fps} fps`} />
+            </Stack>
+
+            {/* The records each clause of the frame story rests on, so the
+                sentence can be checked against the JSON below rather than taken
+                on trust. */}
+            {story.grounds.length ? (
+              <>
+                <Typography variant="caption" sx={{ display: 'block', mt: 1.5, mb: 0.5 }}>
+                  the frame story rests on
+                </Typography>
+                <Stack spacing={0.25}>
+                  {story.grounds.map((ground) => (
+                    <Typography key={ground} sx={{ fontFamily: mono, fontSize: '0.66rem', color: brand.textDim }}>
+                      {ground}
+                    </Typography>
+                  ))}
+                </Stack>
+              </>
+            ) : null}
+
+            {/* frame_ref → object_id → evidence_ref, one row per object. */}
+            <Typography variant="caption" sx={{ display: 'block', mt: 1.5, mb: 0.5 }}>
+              evidence per object
+            </Typography>
+            <Stack spacing={0.25}>
+              {evidence.map((entry) => {
+                const box = entry.object.bbox;
+                const confidence = entry.object.confidence;
+                return (
+                  <Typography
+                    key={entry.object.objectId ?? entry.object.label}
+                    sx={{ fontFamily: mono, fontSize: '0.66rem', color: brand.textDim }}
+                  >
+                    {[
+                      entry.object.label,
+                      entry.object.classId,
+                      entry.object.objectId ?? 'no object_id',
+                      entry.cropId ? `crop ${entry.cropId}` : `no crop (${entry.skipReason ?? 'none recorded'})`,
+                      entry.cropFrameSeq !== null ? `from frame ${entry.cropFrameSeq}` : '',
+                      box
+                        ? `box ${box.x1.toFixed(3)},${box.y1.toFixed(3)}→${box.x2.toFixed(3)},${box.y2.toFixed(3)}`
+                        : 'no box',
+                      confidence ? `conf ${confidence.value.toFixed(3)}` : '',
+                      entry.object.attributes.find((attribute) => attribute.evidenceRef)?.evidenceRef ?? '',
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </Typography>
+                );
+              })}
             </Stack>
             <Box
               component="pre"
@@ -532,6 +590,122 @@ function FrameCard({
         </Collapse>
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * One object's evidence, in a tile the size of a thumbnail.
+ *
+ * Three states, captioned apart because they are three different claims:
+ *
+ * - **the crop** — the image the model was given, served from the archive the
+ *   Flow 5 sink wrote. Captioned with the frame it came from when that is not
+ *   this frame, because an object is examined once per freshness window.
+ * - **the frame at the detected position** — the frame image, magnified to the
+ *   recorded box by CSS. No picture is produced here and nothing is cropped:
+ *   the browser is showing part of an image it already has. It is never called
+ *   a crop, because the model was not shown it.
+ * - **no image** — nothing was kept, and the platform's recorded reason is
+ *   attached rather than the space being left blank.
+ */
+function EvidenceTile({
+  entry,
+  url,
+  frameUrl,
+  selected,
+  onSelect,
+}: {
+  entry: FrameEvidence;
+  url: string | null;
+  frameUrl: string | null;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const box = entry.object.bbox;
+  const isCrop = Boolean(url);
+  const showRegion = !isCrop && Boolean(frameUrl) && Boolean(box);
+
+  // A crop exists but cannot be addressed: viewing imagery is attributable, and
+  // no purpose has been declared yet. Distinct from having no crop at all.
+  const purposeWithheld = Boolean(entry.cropId) && !url;
+
+  const caption = isCrop
+    ? entry.kind === 'crop_from_other_frame' && entry.cropFrameSeq !== null
+      ? `sent to the model · frame ${entry.cropFrameSeq}`
+      : 'sent to the model'
+    : purposeWithheld
+      ? 'image kept — purpose needed'
+      : showRegion
+        ? 'this frame, at its position'
+        : 'no image kept';
+
+  const tooltip = purposeWithheld
+    ? 'An image was kept for this object. Declare a purpose above to view it.'
+    : entry.note || 'This is the image the model was given.';
+
+  return (
+    <Tooltip arrow title={tooltip}>
+      <Box onClick={onSelect} sx={{ cursor: 'pointer', textAlign: 'center', width: 96 }}>
+        <Box
+          sx={{
+            width: 96,
+            height: 96,
+            borderRadius: 1,
+            bgcolor: '#05070d',
+            border: `1px solid ${
+              selected ? brand.accent : isCrop ? `${observability.observing}66` : brand.border
+            }`,
+            overflow: 'hidden',
+            position: 'relative',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          {url ? (
+            <Box
+              component="img"
+              src={url}
+              alt={`${entry.object.label} crop`}
+              sx={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
+            />
+          ) : showRegion && box ? (
+            <Box
+              component="img"
+              src={frameUrl!}
+              alt={`${entry.object.label} region`}
+              sx={{
+                position: 'absolute',
+                width: `${100 / Math.max(box.x2 - box.x1, 0.02)}%`,
+                height: `${100 / Math.max(box.y2 - box.y1, 0.02)}%`,
+                left: `${(-box.x1 * 100) / Math.max(box.x2 - box.x1, 0.02)}%`,
+                top: `${(-box.y1 * 100) / Math.max(box.y2 - box.y1, 0.02)}%`,
+                objectFit: 'fill',
+                opacity: 0.85,
+              }}
+            />
+          ) : (
+            <Typography sx={{ fontSize: '1.4rem', opacity: 0.5 }}>
+              {ICONS[entry.object.classId] ?? '•'}
+            </Typography>
+          )}
+        </Box>
+        <Typography variant="caption" sx={{ display: 'block', fontSize: '0.64rem', fontWeight: 600 }}>
+          {entry.object.label}
+        </Typography>
+        <Typography
+          variant="caption"
+          sx={{
+            display: 'block',
+            fontSize: '0.56rem',
+            lineHeight: 1.25,
+            color: isCrop ? observability.observing : brand.textDim,
+          }}
+        >
+          {caption}
+        </Typography>
+      </Box>
+    </Tooltip>
   );
 }
 
@@ -604,16 +778,17 @@ function ObjectUnderstanding({
 function ObjectDetail({
   object,
   frameUrl,
+  evidence,
   cropUrl,
-  cropsRefused,
 }: {
   object: FrameObject;
   frameUrl: string | null;
-  cropUrl: string | null;
-  cropsRefused: boolean;
+  evidence: FrameEvidence | null;
+  cropUrl: (cropId: string) => string | null;
 }) {
   const box = object.bbox;
-  const evidence = object.attributes.find((attribute) => attribute.evidenceRef)?.evidenceRef;
+  const evidenceRef = object.attributes.find((attribute) => attribute.evidenceRef)?.evidenceRef;
+  const url = evidence?.cropId ? cropUrl(evidence.cropId) : null;
 
   return (
     <Box sx={{ mt: 2.5, p: 1.5, borderRadius: 1.5, border: `1px solid ${brand.accent}55` }}>
@@ -624,11 +799,11 @@ function ObjectDetail({
       <Stack direction="row" spacing={2} alignItems="flex-start" flexWrap="wrap" useFlexGap>
         {/* The crop the model was actually asked about, when the deployment's
             retention policy kept it. */}
-        {cropUrl ? (
+        {url ? (
           <Box sx={{ flexShrink: 0 }}>
             <Box
               component="img"
-              src={cropUrl}
+              src={url}
               alt={`${object.label} crop`}
               sx={{
                 width: 190,
@@ -641,7 +816,9 @@ function ObjectDetail({
               }}
             />
             <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: observability.observing }}>
-              the image sent to the model
+              {evidence?.kind === 'crop_from_other_frame' && evidence.cropFrameSeq !== null
+                ? `the image sent to the model, taken on frame ${evidence.cropFrameSeq}`
+                : 'the image sent to the model'}
             </Typography>
           </Box>
         ) : null}
@@ -692,16 +869,16 @@ function ObjectDetail({
                 value={`${box.x1.toFixed(3)}, ${box.y1.toFixed(3)} → ${box.x2.toFixed(3)}, ${box.y2.toFixed(3)}`}
               />
             ) : null}
-            <Trace label="evidence" value={evidence ?? 'none recorded'} />
+            <Trace label="evidence" value={evidenceRef ?? 'none recorded'} />
+            <Trace label="crop" value={evidence?.cropId ?? 'none retained'} />
+            <Trace label="no crop because" value={evidence?.skipReason ?? ''} />
             <Trace label="records" value={object.observationIds.length.toString()} />
           </Stack>
 
-          {!cropUrl ? (
+          {/* The platform's own recorded reason, not this page's guess at one. */}
+          {!url && evidence?.note ? (
             <Typography variant="caption" sx={{ display: 'block', mt: 1, color: observability.degraded }}>
-              {cropsRefused
-                ? 'The image sent to the model was not kept: this deployment’s retention policy ' +
-                  'is not “evidence”, so crops are analysed and discarded.'
-                : 'No image was retained for this object — it may not have been examined in this frame.'}
+              {evidence.note}
             </Typography>
           ) : null}
         </Box>

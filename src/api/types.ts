@@ -253,15 +253,31 @@ export interface RetainedCrop {
   height: number;
 }
 
+/**
+ * A candidate the Crop Manager considered and did not crop, with its reason.
+ *
+ * The other half of the crop index, and the reason a viewer can show a whole
+ * frame honestly: an object with no crop is not a gap, it is a decision, and
+ * `reason` is the platform's own word for which decision it was.
+ */
+export interface CropSkip {
+  frame_seq: number | null;
+  /** A `SkipReason` value — `no_demand`, `quality_insufficient`, and so on. */
+  reason: string;
+  detail?: string;
+}
+
 export interface CropIndex {
   available: boolean;
   reason?: string;
   written?: number;
   retained?: number;
+  skipped?: number;
   refused_ephemeral?: number;
   refused_never_persist?: number;
   errors?: number;
   by_object: Record<string, RetainedCrop[]>;
+  skips_by_object?: Record<string, CropSkip[]>;
 }
 
 // --- stream --------------------------------------------------------------- //
