@@ -30,7 +30,7 @@ import {
   Typography,
 } from '@mui/material';
 import SummarizeIcon from '@mui/icons-material/AutoAwesomeOutlined';
-import NarrationIcon from '@mui/icons-material/SubtitlesOutlined';
+import FramesIcon from '@mui/icons-material/SubtitlesOutlined';
 import DashboardIcon from '@mui/icons-material/SpaceDashboardOutlined';
 import VideocamIcon from '@mui/icons-material/VideocamOutlined';
 import PeopleIcon from '@mui/icons-material/GroupsOutlined';
@@ -51,7 +51,7 @@ import { brand, mono, observability } from '../theme/theme';
 
 export type PageId =
   | 'summary'
-  | 'narration'
+  | 'frames'
   | 'dashboard'
   | 'cameras'
   | 'objects'
@@ -68,7 +68,7 @@ export const PAGES: Array<{ id: PageId; label: string; icon: JSX.Element; group:
   // question; this one answers "what is happening?" for whoever is being shown
   // the product.
   { id: 'summary', label: 'Live Summary', icon: <SummarizeIcon />, group: 'What is happening' },
-  { id: 'narration', label: 'Frame by Frame', icon: <NarrationIcon />, group: 'What is happening' },
+  { id: 'frames', label: 'Frame by Frame', icon: <FramesIcon />, group: 'What is happening' },
   { id: 'dashboard', label: 'Dashboard', icon: <DashboardIcon />, group: 'Overview' },
   { id: 'cameras', label: 'Live Cameras', icon: <VideocamIcon />, group: 'Overview' },
   { id: 'objects', label: 'Objects', icon: <PeopleIcon />, group: 'Perception' },
@@ -234,7 +234,13 @@ export function Shell({
           </Toolbar>
         </AppBar>
 
-        {model.data && model.data.adapter_id !== 'understander.qwen_vl' && sessionId ? (
+        {/* A constant answering is the thing worth warning about, and the
+            adapter naming convention is what says so: `understander.*` is a
+            model, `attr.*` is a specialized head. This used to compare against
+            one hardcoded model id, so binding NVIDIA made the app announce that
+            attributes were not coming from a vision model while NVIDIA was
+            answering — the banner accusing the truth of being a lie. */}
+        {model.data && sessionId && !model.data.adapter_id?.startsWith('understander.') ? (
           <Alert severity="warning" variant="outlined" square sx={{ borderLeft: 'none', borderRight: 'none' }}>
             <strong>Attributes are not coming from a vision model.</strong> The bound adapter is{' '}
             <Mono>{model.data.adapter_id}</Mono> — {model.data.binding_note}

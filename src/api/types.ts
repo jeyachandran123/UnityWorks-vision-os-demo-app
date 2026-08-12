@@ -236,44 +236,32 @@ export interface EconomyReport {
   note: string;
 }
 
-// --- frame narration ------------------------------------------------------ //
-
 /**
- * One frame, described by the vision model in a sentence.
+ * Crops the deployment retained, indexed by the object they were taken of.
  *
- * **Not an observation.** No confidence, no evidence reference, no provenance,
- * and no replay guarantee — the platform did not produce it and does not vouch
- * for it. `is_observation` is carried on every record rather than assumed from
- * context, because these get rendered next to real observations and the
- * difference has to survive the trip.
+ * `refused_ephemeral` and `refused_never_persist` are reported rather than
+ * hidden: a viewer seeing no images has to be able to tell "none were produced"
+ * from "the retention policy declined to keep them".
  */
-export interface NarrationRecord {
-  frame_index: number;
-  text: string;
-  available: boolean;
-  reason?: string;
-  latency_ms: number;
-  model?: string;
-  kind: 'model_narration';
-  is_observation: false;
+export interface RetainedCrop {
+  crop_id: string;
+  object_id: string | null;
+  camera_id: string;
+  frame_seq: number | null;
+  t_capture_ns: number;
+  width: number;
+  height: number;
 }
 
-export interface NarrationFeed {
-  available: boolean;
-  running: boolean;
-  started: boolean;
-  stride?: number;
-  records: NarrationRecord[];
-  note?: string;
-}
-
-export interface NarrationStatus {
+export interface CropIndex {
   available: boolean;
   reason?: string;
-  session_id?: string;
-  stride?: number;
-  max_frames?: number;
-  running?: boolean;
+  written?: number;
+  retained?: number;
+  refused_ephemeral?: number;
+  refused_never_persist?: number;
+  errors?: number;
+  by_object: Record<string, RetainedCrop[]>;
 }
 
 // --- stream --------------------------------------------------------------- //

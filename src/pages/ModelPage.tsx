@@ -23,7 +23,10 @@ export function ModelPage() {
 
   const data = model.data;
   const inference = data?.inference;
-  const isRealModel = data?.adapter_id === 'understander.qwen_vl';
+  // `understander.*` is a model adapter; `attr.*` is a constant-answer head.
+  // Comparing against a single model id made every provider except one look
+  // like a fallback.
+  const isRealModel = Boolean(data?.adapter_id?.startsWith('understander.'));
   const capabilities = (data?.capabilities ?? {}) as Record<string, unknown>;
 
   return (

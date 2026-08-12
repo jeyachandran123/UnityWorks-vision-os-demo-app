@@ -14,6 +14,7 @@
 
 import type {
   ArchitectureReport,
+  CropIndex,
   EconomyReport,
   EvidenceView,
   FrameLedgerEntry,
@@ -21,8 +22,6 @@ import type {
   MediaAsset,
   MetricsResponse,
   ModelPanel,
-  NarrationFeed,
-  NarrationStatus,
   Observation,
   ObjectView,
   SessionDescription,
@@ -213,23 +212,32 @@ export class VisionOsClient {
     return `${this.baseUrl}/api/v1/sessions/${encodeURIComponent(id)}/frames/${index}${qs({ purpose })}`;
   }
 
-  // --- frame narration ------------------------------------------------------ //
+  // --- retained crops -------------------------------------------------------- //
   //
-  // Deliberately grouped apart from the Observation API below. These sentences
-  // are the vision model describing a whole frame, not something Vision OS
-  // recorded — they carry no confidence, no evidence and no provenance, and the
-  // platform does not vouch for them. Mixing the two calls in one section would
-  // be the first step toward mixing them on screen.
+  // The image a model was actually asked about, when the deployment's retention
+  // policy allowed it to be kept. `ephemeral` and `never_persist` crops are not
+  // written at all, so an empty index is a policy outcome rather than a fault —
+  // which is why the index reports what it refused.
 
-  startNarration(sessionId: string, body: { stride?: number; max_frames?: number } = {}) {
-    return this.post<NarrationStatus>(`/sessions/${encodeURIComponent(sessionId)}/narration`, body);
+  crops(sessionId: string): Promise<CropIndex> {
+    return this.get(`/crops${qs({ session_id: sessionId })}`);
   }
 
-  narration(sessionId: string): Promise<NarrationFeed> {
-    return this.get(`/sessions/${encodeURIComponent(sessionId)}/narration`);
+  /** Requires a declared purpose, exactly as frame access does. */
+  cropUrl(cropId: string, purpose: string, sessionId?: string): string {
+    return `${this.baseUrl}/api/v1/crops/${encodeURIComponent(cropId)}${qs({
+      purpose,
+      session_id: sessionId,
+    })}`;
   }
 
   // --- the Observation API ------------------------------------------------- //
+  //
+  // There was a `startNarration`/`narration` pair here that asked the platform
+  // service to caption whole frames with the VLM. It has been removed, and the
+  // methods below are what replaced it: every sentence the UI shows is now
+  // rendered from observations the platform recorded, so there is exactly one
+  // way for a model answer to reach the screen and it runs through P15.
 
   queryState(sessionId: string | null): Promise<StateResult> {
     return this.post('/state/query', {

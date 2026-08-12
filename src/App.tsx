@@ -33,7 +33,7 @@ function Router({ page }: { page: PageId }) {
   switch (page) {
     case 'summary':
       return <LiveSummary />;
-    case 'narration':
+    case 'frames':
       return <FrameByFrame />;
     case 'cameras':
       return <LiveCameras />;
