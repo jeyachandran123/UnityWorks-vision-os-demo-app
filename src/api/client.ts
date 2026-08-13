@@ -43,6 +43,17 @@ export class ApiError extends Error {
 /** The harness is unreachable — no platform was contacted at all. */
 export const UNREACHABLE = 'PLATFORM_UNREACHABLE';
 
+/**
+ * Records per observation page, and how many pages will be drained.
+ *
+ * 1000 is the platform's own `max_page_size`, so this asks for the largest page
+ * it will serve. The ceiling then bounds a pathological session rather than a
+ * normal one: 40 pages is 40,000 observations, far beyond any replay this
+ * application opens, and reaching it is reported rather than assumed away.
+ */
+export const OBSERVATION_PAGE_SIZE = 1000;
+export const MAX_OBSERVATION_PAGES = 40;
+
 export function isUnreachable(error: unknown): boolean {
   return error instanceof ApiError && error.code === UNREACHABLE;
 }
@@ -247,11 +258,59 @@ export class VisionOsClient {
     });
   }
 
-  queryObservations(
+  /**
+   * Every observation in the window, following the platform's cursor.
+   *
+   * **The page is not the answer.** `query_observations` orders by `t_capture`
+   * and returns the first `limit` records with a cursor for the rest, and this
+   * method used to ask for 500 and ignore the cursor entirely. That is not a
+   * partial read that degrades gracefully — it is a *chronological* truncation.
+   * The 500 oldest observations of a session are the opening seconds of the
+   * video, so a viewer built on this saw a timeline that simply stopped, at a
+   * point determined by how talkative the first few frames happened to be.
+   *
+   * Paging to exhaustion is what makes "the timeline covers the video" a
+   * property of the data rather than a coincidence of its size.
+   *
+   * `truncated` reports the one case that remains: a session so long it exceeds
+   * `MAX_OBSERVATION_PAGES`. The caller can say so. It is never silent, because
+   * silence here is the bug being fixed.
+   */
+  async queryObservations(
     sessionId: string | null,
     window: { start_ns: number; end_ns: number },
-  ): Promise<{ observations: Observation[]; window_fully_observable: boolean }> {
-    return this.post('/observations/query', { session_id: sessionId, window, limit: 500 });
+  ): Promise<{
+    observations: Observation[];
+    window_fully_observable: boolean;
+    truncated: boolean;
+  }> {
+    const observations: Observation[] = [];
+    let cursor: string | null = null;
+    let fullyObservable = true;
+    let truncated = true;
+
+    for (let page = 0; page < MAX_OBSERVATION_PAGES; page += 1) {
+      const body: {
+        observations?: Observation[];
+        cursor?: string | null;
+        window_fully_observable?: boolean;
+      } = await this.post('/observations/query', {
+        session_id: sessionId,
+        window,
+        limit: OBSERVATION_PAGE_SIZE,
+        ...(cursor ? { cursor } : {}),
+      });
+
+      observations.push(...(body.observations ?? []));
+      fullyObservable = fullyObservable && body.window_fully_observable !== false;
+      cursor = body.cursor ?? null;
+      if (!cursor) {
+        truncated = false;
+        break;
+      }
+    }
+
+    return { observations, window_fully_observable: fullyObservable, truncated };
   }
 
   getObject(objectId: string, sessionId?: string): Promise<ObjectView> {

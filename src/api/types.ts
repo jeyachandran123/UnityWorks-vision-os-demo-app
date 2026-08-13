@@ -85,8 +85,16 @@ export interface CapabilitySummary {
   taxonomy_version?: string;
   producible_classes: string[];
   producible_attributes: string[];
-  gaps?: unknown[];
-  models_in_use?: unknown[];
+  /**
+   * `[key, value]` pairs stating what the platform *cannot* do.
+   *
+   * Typed rather than `unknown[]` because the page now reads two of them:
+   * `detector.label_space` and `detector.vocabulary`, which together say whether
+   * a class name is an identification or the nearest word in a fixed list.
+   */
+  gaps?: Array<[string, string]>;
+  /** `[adapter_id, model_id, model_version]`, as the platform reports it. */
+  models_in_use?: Array<[string, string, string]>;
 }
 
 export interface StateResult {

@@ -50,6 +50,32 @@ export function useVisionState() {
   });
 }
 
+/**
+ * When each sampled frame was taken, in the video's own time.
+ *
+ * The observation feed cannot answer this. `t_capture_ns` is stamped by the
+ * platform clock the harness pump advances, so it measures *replay* progress —
+ * a 13-second video replayed at 6 fps reports its last frame at about four
+ * seconds, and the number moves if the replay pace changes.
+ *
+ * The ledger is the harness's record of what it actually fed in, and each entry
+ * carries the `pts_ms` the decoder read off the container. Sample 27 of a
+ * 30 fps video is source frame 405 at 13.50 s, and the ledger says so. Joining
+ * on it gives the timeline a timestamp that was measured rather than computed
+ * from an array position or a rate this layer had to assume.
+ */
+export function useFrameLedger() {
+  const { client, sessionId, session } = usePlatform();
+  return useQuery({
+    queryKey: ['frame-ledger', sessionId, session?.frame_index],
+    // 5000 is the route's own ceiling, and above any sampled set a session
+    // can hold — the decoder stops at 3600.
+    queryFn: () => client.frameLedger(sessionId!, 5000),
+    enabled: Boolean(sessionId),
+    retry: false,
+  });
+}
+
 export function useObservations() {
   const { client, sessionId, session } = usePlatform();
   return useQuery({

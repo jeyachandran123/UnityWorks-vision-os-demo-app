@@ -46,7 +46,7 @@ import {
 } from '@mui/material';
 import { useQuery } from '@tanstack/react-query';
 import { usePlatform } from '../api/provider';
-import { useHealth, useObservations } from '../api/hooks';
+import { useFrameLedger, useHealth, useObservations, useVisionState } from '../api/hooks';
 import {
   collectFrameEvidence,
   countByClass,
@@ -55,7 +55,7 @@ import {
   describeFrameStory,
   describeUnderstanding,
   deriveHighlights,
-  formatClock,
+  frameClock,
   groupObservationsByFrame,
   humanClass,
   titleCase,
@@ -64,6 +64,12 @@ import {
   type FrameObject,
 } from '../insights/frames';
 import type { CropIndex } from '../api/types';
+import {
+  describeLabelSpace,
+  qualifyClassClaim,
+  readLabelSpace,
+  type LabelSpace,
+} from '../insights/capability';
 import { EmptyState, Loading, Mono, SectionTitle, Unavailable } from '../components/primitives';
 import { brand, mono, observability } from '../theme/theme';
 
@@ -100,18 +106,43 @@ export function FrameByFrame() {
     retry: false,
   });
 
+  // When each sampled frame sits in the video, and what the bound detector can
+  // actually name. Both are reads; neither changes anything Vision OS recorded.
+  const ledger = useFrameLedger();
+  const state = useVisionState();
+  const labelSpace = useMemo(
+    () => readLabelSpace(state.data?.capabilities),
+    [state.data],
+  );
+
   const [purpose, setPurpose] = useState('');
   const [confirmedPurpose, setConfirmedPurpose] = useState('');
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
   const [selectedObject, setSelectedObject] = useState<string | null>(null);
   const [showTrace, setShowTrace] = useState(false);
 
+  const sourceMsByFrame = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const entry of ledger.data?.entries ?? []) map.set(entry.frame_index, entry.pts_ms);
+    return map;
+  }, [ledger.data]);
+
   const groups = useMemo(
-    () => groupObservationsByFrame(feed.data?.observations ?? []),
-    [feed.data],
+    () => groupObservationsByFrame(feed.data?.observations ?? [], sourceMsByFrame),
+    [feed.data, sourceMsByFrame],
   );
 
   const highlights = useMemo(() => deriveHighlights(groups), [groups]);
+
+  // What the timeline actually covers. A viewer can read the end of this against
+  // the length of the video and see for themselves that nothing was cut off.
+  const span = useMemo(() => {
+    if (!groups.length) return null;
+    return {
+      first: frameClock(groups[0]!).text,
+      last: frameClock(groups[groups.length - 1]!).text,
+    };
+  }, [groups]);
 
   // Focus the newest frame as records arrive, until the viewer picks one.
   useEffect(() => {
@@ -138,11 +169,78 @@ export function FrameByFrame() {
     <Stack spacing={2.5} sx={{ maxWidth: 1040 }}>
       <SectionTitle
         action={
-          <Chip size="small" variant="outlined" label={`${groups.length} frames`} />
+          <Stack direction="row" spacing={0.75} alignItems="center">
+            <Tooltip
+              arrow
+              title={
+                `${groups.length} of the ${session?.frame_count ?? '—'} sampled frames ` +
+                'carry observations. A sampled frame with none was still analysed — the ' +
+                'platform suppresses a record that repeats the last one exactly, so a ' +
+                'static scene goes quiet rather than restating itself. These are analysis ' +
+                'frames, not the video’s own: the video is sampled, not examined frame by frame.'
+              }
+            >
+              <Chip
+                size="small"
+                variant="outlined"
+                label={
+                  session?.frame_count
+                    ? `${groups.length} of ${session.frame_count} analysis frames`
+                    : `${groups.length} analysis frames`
+                }
+              />
+            </Tooltip>
+            {span ? (
+              <Chip
+                size="small"
+                variant="outlined"
+                label={`${span.first} – ${span.last}`}
+                sx={{ fontFamily: mono }}
+              />
+            ) : null}
+          </Stack>
         }
       >
         Frame by frame
       </SectionTitle>
+
+      {/* The one case paging cannot cover, stated rather than shown as a video
+          that ends early — which is the failure this page had. */}
+      {feed.data?.truncated ? (
+        <Alert severity="warning" variant="outlined">
+          <strong>This session has more observations than one read can carry.</strong> The
+          timeline below stops before the end of the video. It is not a record of the video
+          ending.
+        </Alert>
+      ) : null}
+
+      {session?.frame_count && groups.length < session.frame_count ? (
+        <Alert severity="info" variant="outlined">
+          <strong>
+            {session.frame_count - groups.length} of {session.frame_count} sampled frames
+            produced no new record.
+          </strong>{' '}
+          They were analysed. The platform suppresses an observation that repeats the
+          previous one exactly, so a scene that stops changing stops emitting — an absent
+          frame below is silence, not a gap in processing.
+        </Alert>
+      ) : null}
+
+      {/* What the detector can name at all. Shown once, above everything that
+          depends on it, because every class name on this page is downstream of
+          it. A closed-set model has no way to say "not one of mine", so its
+          answer is the nearest of a fixed list and must not read as an identity. */}
+      {describeLabelSpace(labelSpace) ? (
+        <Alert severity="info" variant="outlined">
+          <strong>Names on this page come from a fixed vocabulary.</strong>{' '}
+          {describeLabelSpace(labelSpace)}{' '}
+          <Tooltip arrow title={labelSpace.vocabulary.join(', ')}>
+            <Box component="span" sx={{ textDecoration: 'underline dotted', cursor: 'help' }}>
+              See the {labelSpace.size} it knows.
+            </Box>
+          </Tooltip>
+        </Alert>
+      ) : null}
 
       {!framesServed ? (
         <Alert severity="info" variant="outlined">
@@ -190,7 +288,7 @@ export function FrameByFrame() {
                 <Chip
                   key={group.key}
                   size="small"
-                  label={formatClock(group.captureNs / 1e9)}
+                  label={frameClock(group).text}
                   onClick={() => {
                     setFocusedKey(group.key);
                     setSelectedObject(null);
@@ -220,6 +318,7 @@ export function FrameByFrame() {
         <FrameCard
           group={focused}
           fps={fps}
+          labelSpace={labelSpace}
           // Which object maps to which retained image is decided by
           // `collectFrameEvidence`, in one place and under test. This supplies
           // only the address of a crop the sink already wrote — and refuses to
@@ -256,6 +355,7 @@ export function FrameByFrame() {
 function FrameCard({
   group,
   fps,
+  labelSpace,
   frameUrl,
   cropIndex,
   cropUrl,
@@ -267,6 +367,7 @@ function FrameCard({
 }: {
   group: FrameGroup;
   fps: number;
+  labelSpace: LabelSpace;
   frameUrl: string | null;
   cropIndex: CropIndex | null;
   cropUrl: (cropId: string) => string | null;
@@ -277,6 +378,8 @@ function FrameCard({
   onToggleTrace: () => void;
 }) {
   const counts = countByClass(group);
+  const clock = frameClock(group);
+  const qualifier = qualifyClassClaim(labelSpace);
   const summary = describeDetections(group);
   const story = describeFrameStory(group);
   // One entry per object in the frame, always — an object with no retained
@@ -290,11 +393,27 @@ function FrameCard({
     <Card>
       <CardContent>
         <Stack direction="row" alignItems="baseline" spacing={1.5} sx={{ mb: 1.5 }}>
-          <Typography sx={{ fontSize: '1.6rem', fontWeight: 700, fontFamily: mono }}>
-            {formatClock(group.captureNs / 1e9)}
-          </Typography>
+          <Tooltip
+            arrow
+            title={
+              clock.fromSource
+                ? 'Where this frame sits in the video, from the timestamp the decoder read off the container.'
+                : 'This frame has no ledger entry, so the platform’s capture stamp is shown instead. On a replay that measures progress through the replay, not through the video.'
+            }
+          >
+            <Typography
+              sx={{
+                fontSize: '1.6rem',
+                fontWeight: 700,
+                fontFamily: mono,
+                color: clock.fromSource ? brand.text : observability.degraded,
+              }}
+            >
+              {clock.text}
+            </Typography>
+          </Tooltip>
           <Typography variant="caption">
-            {group.frameIndex !== null ? `frame ${group.frameIndex}` : 'no frame number recorded'}
+            {group.frameIndex !== null ? `analysis frame ${group.frameIndex}` : 'no frame number recorded'}
             {' · '}
             {group.observations.length} records
           </Typography>
@@ -382,14 +501,60 @@ function FrameCard({
           {counts.length === 0 ? (
             <Typography variant="caption">Nothing the camera recognises.</Typography>
           ) : (
-            counts.map(({ classId, count }) => (
-              <Chip
-                key={classId}
-                size="small"
-                label={`${ICONS[classId] ?? '•'}  ${titleCase(humanClass(classId))} × ${count}`}
-                sx={{ bgcolor: brand.surfaceHigh, fontSize: '0.78rem' }}
-              />
-            ))
+            counts.map(({ classId, count }) => {
+              // The best confidence the detector gave this class in this frame,
+              // shown on the chip. A name without a number is where "toothbrush"
+              // stopped looking like a guess and started looking like a fact.
+              const strongest = group.objects
+                .filter((object) => object.classId === classId)
+                .reduce(
+                  (best, object) => Math.max(best, object.confidence?.value ?? 0),
+                  0,
+                );
+              return (
+                <Tooltip
+                  key={classId}
+                  arrow
+                  title={
+                    qualifier
+                      ? `“${humanClass(classId)}” is the closest of the ${labelSpace.size} ` +
+                        'names this detector has to what it saw. It is not an ' +
+                        'identification: an object outside those ' +
+                        `${labelSpace.size} is still reported as one of them.` +
+                        (strongest
+                          ? ` The platform scores it ${(strongest * 100).toFixed(0)}%, which ` +
+                            'measures how consistently this object’s evidence points at that ' +
+                            'word — not whether the word is right.'
+                          : '')
+                      : `Detected${strongest ? ` at ${(strongest * 100).toFixed(0)}%` : ''}.`
+                  }
+                >
+                  <Chip
+                    size="small"
+                    label={
+                      `${ICONS[classId] ?? '•'}  ${titleCase(humanClass(classId))} × ${count}` +
+                      // The number goes in the tooltip, never on the chip, when
+                      // the vocabulary is closed. `Toothbrush × 1 · 100%` reads
+                      // as certainty about what the object *is*; the score
+                      // actually measures how consistently this object's
+                      // evidence points at that word, and it reaches 100% for a
+                      // track that was only ever guessed at.
+                      (qualifier
+                        ? ` · ${qualifier}`
+                        : strongest
+                          ? ` · ${(strongest * 100).toFixed(0)}%`
+                          : '')
+                    }
+                    sx={{
+                      bgcolor: brand.surfaceHigh,
+                      fontSize: '0.78rem',
+                      cursor: 'help',
+                      border: qualifier ? `1px dashed ${brand.border}` : undefined,
+                    }}
+                  />
+                </Tooltip>
+              );
+            })
           )}
         </Stack>
 
@@ -411,6 +576,16 @@ function FrameCard({
           <Typography variant="caption" sx={{ display: 'block', mt: 0.5, fontStyle: 'italic' }}>
             No activity was recorded for these objects, so the story reports only what was
             detected.
+          </Typography>
+        ) : null}
+        {/* The story names things using the detector's words, so it inherits the
+            detector's limits. Saying so here, next to the sentence, is what stops
+            a readable summary from being a more confident claim than the records
+            underneath it. */}
+        {qualifier && group.objects.length > 0 ? (
+          <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: observability.degraded }}>
+            Names above are the closest matches from a {labelSpace.size}-word vocabulary. An
+            object this camera was never taught is still reported as one of those {labelSpace.size}.
           </Typography>
         ) : null}
 
@@ -516,8 +691,27 @@ function FrameCard({
               <Trace label="camera" value={group.cameraId} />
               <Trace label="objects" value={String(group.objects.length)} />
               <Trace label="observations" value={String(group.observations.length)} />
-              <Trace label="capture" value={`${(group.captureNs / 1e9).toFixed(3)} s`} />
+              {/* Two different clocks, never merged. `source` is where this
+                  frame sits in the video; `capture` is the platform's own stamp,
+                  which on a replay tracks the replay. */}
+              <Trace
+                label="source"
+                value={
+                  group.sourceMs !== null
+                    ? `${(group.sourceMs / 1000).toFixed(3)} s into the video`
+                    : 'not in the frame ledger'
+                }
+              />
+              <Trace label="capture" value={`${(group.captureNs / 1e9).toFixed(3)} s (replay clock)`} />
               <Trace label="sampled at" value={`${fps} fps`} />
+              <Trace
+                label="label space"
+                value={
+                  labelSpace.kind === 'unknown'
+                    ? 'not declared by the platform'
+                    : `${labelSpace.kind} · ${labelSpace.space} · ${labelSpace.size} names`
+                }
+              />
             </Stack>
 
             {/* The records each clause of the frame story rests on, so the

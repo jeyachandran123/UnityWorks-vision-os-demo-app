@@ -52,7 +52,22 @@ export interface FrameObject {
 export interface FrameGroup {
   key: string;
   frameIndex: number | null;
+  /**
+   * The platform's own capture stamp, from the observations.
+   *
+   * On a replay session this advances with the harness pump rather than with
+   * the video, so it is kept for traceability and is **not** what the timeline
+   * shows. See `sourceMs`.
+   */
   captureNs: number;
+  /**
+   * Where this frame sits in the source video, in milliseconds — the decoder's
+   * measured `pts_ms`, joined from the frame ledger.
+   *
+   * `null` when the ledger has no entry for this frame, which is a real state
+   * and is shown as such rather than back-filled from an array position.
+   */
+  sourceMs: number | null;
   cameraId: string;
   objects: FrameObject[];
   observations: Observation[];
@@ -118,6 +133,40 @@ export function formatClock(seconds: number): string {
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
 }
 
+/**
+ * `0:12.5` — clock time to a tenth of a second.
+ *
+ * Sampling at two frames per second puts consecutive frames half a second
+ * apart, and whole-second formatting renders them as two identical labels. A
+ * timeline where half the chips repeat their neighbour reads as a stuck video.
+ */
+export function formatPreciseClock(seconds: number): string {
+  // Rounded to the nearest tenth, and the minute derived *after* rounding.
+  //
+  // Both halves matter. Flooring showed a sample measured at 13.498 s as
+  // "0:13.4", which reads as a timeline that stops short of where it does.
+  // Rounding first and splitting second is what stops 59.98 s becoming the
+  // impossible "0:60.0".
+  const tenths = Math.round(Math.max(0, seconds) * 10);
+  const minutes = Math.floor(tenths / 600);
+  const rest = (tenths - minutes * 600) / 10;
+  return `${minutes}:${rest < 10 ? '0' : ''}${rest.toFixed(1)}`;
+}
+
+/**
+ * What the timeline should show for a frame, and where the number came from.
+ *
+ * Prefers the video's own clock and says when it is falling back, because the
+ * replay clock is a different quantity that happens to have the same units —
+ * exactly the kind of substitution that should never be silent.
+ */
+export function frameClock(group: FrameGroup): { text: string; fromSource: boolean } {
+  if (group.sourceMs !== null) {
+    return { text: formatPreciseClock(group.sourceMs / 1000), fromSource: true };
+  }
+  return { text: formatPreciseClock(group.captureNs / 1e9), fromSource: false };
+}
+
 // --- frame identity ---------------------------------------------------------- //
 
 export function frameIndexOf(frameRef: unknown): number | null {
@@ -153,17 +202,30 @@ export function describeFrameRef(frameRef: unknown): string {
  * wrong one: a missing field is a finding, and hiding it makes the account of
  * the video look complete when it is not.
  */
-export function groupObservationsByFrame(observations: Observation[]): FrameGroup[] {
+export function groupObservationsByFrame(
+  observations: Observation[],
+  /**
+   * `frame_index` → `pts_ms`, from the session's frame ledger. Supplying it puts
+   * each group on the video's own clock; omitting it leaves `sourceMs` null and
+   * changes nothing else.
+   */
+  sourceMsByFrame?: ReadonlyMap<number, number> | null,
+): FrameGroup[] {
   const groups = new Map<string, FrameGroup>();
 
   for (const observation of observations) {
     const key = describeFrameRef(observation.frame_ref) || `t${observation.t_capture_ns}`;
     let group = groups.get(key);
     if (!group) {
+      const frameIndex = frameIndexOf(observation.frame_ref);
       group = {
         key,
-        frameIndex: frameIndexOf(observation.frame_ref),
+        frameIndex,
         captureNs: observation.t_capture_ns,
+        sourceMs:
+          frameIndex !== null && sourceMsByFrame?.has(frameIndex)
+            ? sourceMsByFrame.get(frameIndex)!
+            : null,
         cameraId: String(observation.camera_id ?? ''),
         objects: [],
         observations: [],
@@ -178,7 +240,13 @@ export function groupObservationsByFrame(observations: Observation[]): FrameGrou
     group.objects = collectObjects(group.observations);
   }
 
-  return [...groups.values()].sort((a, b) => a.captureNs - b.captureNs);
+  // Ordered by where the frames sit in the **video** when that is known, so the
+  // timeline reads in source order rather than in the order the replay happened
+  // to produce them. Falls back to capture time, which is what it always used.
+  return [...groups.values()].sort((a, b) => {
+    if (a.sourceMs !== null && b.sourceMs !== null) return a.sourceMs - b.sourceMs;
+    return a.captureNs - b.captureNs;
+  });
 }
 
 /**

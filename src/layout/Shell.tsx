@@ -309,11 +309,24 @@ function SessionControl() {
         ]);
       }
 
+      // No `max_frames`.
+      //
+      // It used to say 120, which read as a sensible guard and was in fact a
+      // four-second product: the harness truncates to the *first* N decoded
+      // frames, and decoding took every source frame, so a 30 fps clip was cut
+      // at 00:04 no matter how long it ran. Nothing said so — the timeline
+      // simply ended, looking like a video that had finished.
+      //
+      // How much of a video is analysed is now decided by the sampling rate
+      // (two frames per second, in the decoder) applied across its whole
+      // length, so the count follows the duration instead of capping it.
+      //
+      // `target_fps` is unrelated and stays: it is how fast sampled frames are
+      // pushed through the pipeline, not which ones are chosen.
       const created = await client.createSession({
         media_id: selected,
         target_fps: 6,
         autostart: true,
-        max_frames: 120,
       });
 
       // `autostart` is a request to the platform, not a guarantee from it. A
