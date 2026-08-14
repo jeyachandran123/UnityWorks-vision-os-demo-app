@@ -360,3 +360,111 @@ export interface EvidenceView {
   decision_path?: string[];
   provenance?: unknown;
 }
+
+/**
+ * Compliance findings.
+ *
+ * Every field here is produced by the rule engine on the platform side. The demo
+ * renders them and computes nothing: there is no rule in this bundle, no
+ * threshold, and no comparison — `state` arrives decided, and `sentence` arrives
+ * written from the rule document's own wording.
+ *
+ * That is not a stylistic choice. A verdict a browser computed is a verdict
+ * nobody can audit six months later, because the reasoning lived in a bundle
+ * that has since been redeployed.
+ */
+
+/** The three real answers, plus the one that means "this rule did not apply". */
+export type ComplianceState = 'compliant' | 'violation' | 'unknown' | 'not_applicable';
+
+/**
+ * Why a condition could not be established. Rendered verbatim — the UI never
+ * translates one of these into a verdict.
+ */
+export type UnknownReason =
+  | 'attribute_absent'
+  | 'attribute_stale'
+  | 'evidence_unverified'
+  | 'coverage_gap'
+  | 'capability_gap'
+  | 'subject_not_observed'
+  | 'value_unparseable';
+
+export interface ConditionOutcome {
+  attribute_key: string;
+  operator: string;
+  expected: unknown;
+  observed: unknown;
+  /** `true` held · `false` failed · `null` could not be established. */
+  satisfied: boolean | null;
+  unknown_reason: UnknownReason | null;
+  observed_at_ns: number | null;
+  /** Handle for the evidence contract. Never imagery — resolving it is a
+   *  separately privileged request the viewer makes under its own purpose. */
+  evidence_ref: string | null;
+  message: string;
+}
+
+export interface FindingSubject {
+  object_id: string;
+  class_id: string;
+  camera_id: string;
+  /** A display handle assigned by the platform side, e.g. `Person #2`.
+   *  Presentation only — no evaluation reads it. */
+  label: string;
+}
+
+export interface Finding {
+  finding_id: string;
+  rule_id: string;
+  rule_version: string;
+  ruleset_version: string;
+  state: ComplianceState;
+  severity: string;
+  /** The end-user sentence, assembled from the rule document. Not generated. */
+  sentence: string;
+  evaluated_at_ns: number;
+  /** How much of the subject's scope was observable when this was decided. A
+   *  compliant verdict under partial coverage is a different claim. */
+  coverage_fraction: number;
+  subject: FindingSubject;
+  unknown_reasons: UnknownReason[];
+  evidence_refs: string[];
+  conditions: ConditionOutcome[];
+}
+
+export interface ComplianceSummary {
+  total: number;
+  compliant: number;
+  violation: number;
+  unknown: number;
+  not_applicable: number;
+}
+
+export interface ComplianceResult {
+  available: boolean;
+  reason?: string;
+  evaluated_at_ns?: number;
+  ruleset_version?: string;
+  subjects_read?: number;
+  coverage?: {
+    observable_fraction: number;
+    cameras_observing: number;
+    cameras_blind: number;
+    complete: boolean;
+  };
+  findings: Finding[];
+  summary: ComplianceSummary;
+}
+
+export interface ComplianceStatus {
+  enabled: boolean;
+  reason?: string;
+  ruleset_version?: string;
+  rule_count: number;
+  rules: string[];
+  required_attributes: string[];
+  /** Rules depending on an attribute no bound model can produce. Reported so a
+   *  permanent UNKNOWN has a visible cause rather than looking like a bug. */
+  capability_gaps: Array<{ rule_id: string; attribute: string }>;
+}

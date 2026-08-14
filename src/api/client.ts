@@ -14,6 +14,8 @@
 
 import type {
   ArchitectureReport,
+  ComplianceResult,
+  ComplianceStatus,
   CropIndex,
   EconomyReport,
   EvidenceView,
@@ -325,6 +327,28 @@ export class VisionOsClient {
 
   verifyReplay(sessionId?: string): Promise<Record<string, unknown>> {
     return this.post('/replay/verify', { session_id: sessionId });
+  }
+
+  /**
+   * Whether this session can evaluate rules, and what they depend on.
+   *
+   * Worth reading before the findings themselves: an empty finding list means
+   * "nothing is wrong" only when rules are actually loaded, and means "nothing
+   * was evaluated" when they are not. Those are opposite facts.
+   */
+  complianceStatus(sessionId?: string): Promise<ComplianceStatus> {
+    return this.get(`/compliance/status${qs({ session_id: sessionId })}`);
+  }
+
+  /**
+   * Evaluate every rule against current Vision State.
+   *
+   * The evaluation happens on the platform side. This method sends a session id
+   * and receives decided findings — it passes no rule, no threshold and no
+   * observation, because the browser holds none of those and must not.
+   */
+  compliance(sessionId?: string, limit = 200): Promise<ComplianceResult> {
+    return this.post('/compliance/evaluate', { session_id: sessionId, limit });
   }
 }
 

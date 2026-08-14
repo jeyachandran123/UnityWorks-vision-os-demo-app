@@ -63,7 +63,12 @@ import {
   type FrameGroup,
   type FrameObject,
 } from '../insights/frames';
-import type { CropIndex } from '../api/types';
+import type {
+  ComplianceState,
+  ComplianceStatus,
+  CropIndex,
+  Finding,
+} from '../api/types';
 import {
   describeLabelSpace,
   qualifyClassClaim,
@@ -110,6 +115,33 @@ export function FrameByFrame() {
   // actually name. Both are reads; neither changes anything Vision OS recorded.
   const ledger = useFrameLedger();
   const state = useVisionState();
+
+  // Compliance findings, recomputed on the platform side from current Vision
+  // State. Polled alongside the crops rather than accumulated here: a finding is
+  // a pure function of (rules, observations, now), so re-reading is always
+  // correct and needs no invalidation — and a stale violation on screen is worse
+  // than a slow one.
+  const complianceStatus = useQuery({
+    queryKey: ['compliance-status', sessionId],
+    queryFn: () => client.complianceStatus(sessionId!),
+    enabled: Boolean(sessionId),
+    retry: false,
+  });
+  const compliance = useQuery({
+    queryKey: ['compliance', sessionId],
+    queryFn: () => client.compliance(sessionId!),
+    enabled: Boolean(sessionId),
+    refetchInterval: 4000,
+    retry: false,
+  });
+  const findingsByObject = useMemo(() => {
+    const map = new Map<string, Finding[]>();
+    for (const finding of compliance.data?.findings ?? []) {
+      const key = finding.subject.object_id;
+      map.set(key, [...(map.get(key) ?? []), finding]);
+    }
+    return map;
+  }, [compliance.data]);
   const labelSpace = useMemo(
     () => readLabelSpace(state.data?.capabilities),
     [state.data],
@@ -161,7 +193,23 @@ export function FrameByFrame() {
     return <Unavailable what="Observation feed" reason={String(feed.error)} />;
   }
 
+  // Two **independent** permissions, and keeping them apart is the point.
+  //
+  // 12_SECURITY §5.3 separates reading what the camera reported from looking at
+  // the picture, and the harness separates the pictures again: `VOSVC_SERVE_FRAMES`
+  // governs whole frames, `VOSVC_ALLOW_EVIDENCE` governs the retained crops a
+  // model was actually shown. Granting the second while withholding the first is
+  // the recommended posture — a reviewer checking a finding needs the 224x224
+  // crop behind the claim, not the whole room.
+  //
+  // This page used to treat frame serving as the gate for both, which made that
+  // posture unusable: the purpose prompt never rendered, so no purpose could be
+  // declared, so every crop URL stayed null and the evidence tiles reported
+  // "purpose needed" forever with no way to supply one. The crops were being
+  // served correctly the entire time; the page simply never asked for them.
   const framesServed = health.data?.harness.serve_frames ?? false;
+  const evidenceAllowed = health.data?.harness.allow_evidence ?? false;
+  const imageryAvailable = framesServed || evidenceAllowed;
   const focused = groups.find((group) => group.key === focusedKey) ?? groups[groups.length - 1];
   const fps = session?.target_fps ?? 1;
 
@@ -242,11 +290,12 @@ export function FrameByFrame() {
         </Alert>
       ) : null}
 
-      {!framesServed ? (
+      {!imageryAvailable ? (
         <Alert severity="info" variant="outlined">
           <strong>Images are not being served.</strong> The camera's geometry and everything the
           platform recorded is shown below; the pictures themselves stay on the machine unless the
-          deployment enables them (<Mono>VOSVC_SERVE_FRAMES=1</Mono>).
+          deployment enables them (<Mono>VOSVC_SERVE_FRAMES=1</Mono> for whole frames,{' '}
+          <Mono>VOSVC_ALLOW_EVIDENCE=1</Mono> for the crops a model was shown).
         </Alert>
       ) : !confirmedPurpose ? (
         <Card sx={{ borderColor: `${brand.primary}66` }}>
@@ -257,6 +306,14 @@ export function FrameByFrame() {
               and looking at the picture are different permissions, and the second one is
               attributable.
             </Typography>
+            {/* Say which of the two this deployment grants, so a reviewer knows
+                what to expect before declaring a purpose rather than after. */}
+            {!framesServed ? (
+              <Typography variant="caption" sx={{ display: 'block', mb: 1.5, fontStyle: 'italic' }}>
+                This deployment serves the retained crops a model was shown, but not whole frames.
+                You will see each object's own image; the full picture stays on the machine.
+              </Typography>
+            ) : null}
             <Stack direction="row" spacing={1}>
               <TextField
                 size="small"
@@ -334,6 +391,12 @@ export function FrameByFrame() {
               : null
           }
           highlights={highlights.filter((entry) => entry.frameKey === focused.key)}
+          // Findings for the objects in *this* frame, so the panel describes the
+          // moment on screen rather than the whole session.
+          findings={focused.objects.flatMap((object) =>
+            object.objectId ? (findingsByObject.get(object.objectId) ?? []) : [],
+          )}
+          complianceStatus={complianceStatus.data ?? null}
           selectedObject={selectedObject}
           onSelectObject={setSelectedObject}
           showTrace={showTrace}
@@ -360,6 +423,8 @@ function FrameCard({
   cropIndex,
   cropUrl,
   highlights,
+  findings,
+  complianceStatus,
   selectedObject,
   onSelectObject,
   showTrace,
@@ -372,11 +437,15 @@ function FrameCard({
   cropIndex: CropIndex | null;
   cropUrl: (cropId: string) => string | null;
   highlights: ReturnType<typeof deriveHighlights>;
+  findings: Finding[];
+  complianceStatus: ComplianceStatus | null;
   selectedObject: string | null;
   onSelectObject: (id: string | null) => void;
   showTrace: boolean;
   onToggleTrace: () => void;
 }) {
+
+  
   const counts = countByClass(group);
   const clock = frameClock(group);
   const qualifier = qualifyClassClaim(labelSpace);
@@ -632,6 +701,19 @@ function FrameCard({
             ))}
           </Stack>
         )}
+
+        {/* --- compliance ------------------------------------------------------ */}
+        {/*
+          Read, never computed. The rule engine decided these on the platform
+          side; this card renders the decision, the conditions behind it and the
+          rule that produced it. Nothing in this bundle compares a value against
+          a threshold, and nothing here can turn a missing observation into a
+          violation.
+        */}
+        <Typography variant="caption" sx={{ display: 'block', mt: 2.5, mb: 1, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+          Compliance
+        </Typography>
+        <FrameCompliance findings={findings} status={complianceStatus} />
 
         {/* --- selected object detail ------------------------------------------ */}
         {selected ? (
@@ -900,6 +982,184 @@ function EvidenceTile({
         </Typography>
       </Box>
     </Tooltip>
+  );
+}
+
+// --- compliance --------------------------------------------------------------- //
+//
+// Everything below RENDERS a decision. Nothing here makes one.
+//
+// There is no rule in this file, no threshold, no comparison between an observed
+// value and an expected one. `state` arrives decided and `sentence` arrives
+// written, both from the rule engine on the platform side. A verdict a browser
+// computed is a verdict nobody can audit six months later, because the reasoning
+// lived in a bundle that has since been redeployed.
+
+const COMPLIANCE_TONE: Record<ComplianceState, string> = {
+  compliant: observability.observing,
+  violation: observability.blind,
+  unknown: observability.degraded,
+  not_applicable: brand.textDim,
+};
+
+const COMPLIANCE_WORD: Record<ComplianceState, string> = {
+  compliant: 'COMPLIANT',
+  violation: 'VIOLATION',
+  unknown: 'UNKNOWN',
+  not_applicable: 'NOT APPLICABLE',
+};
+
+/** Why a condition could not be established, in a reviewer's words.
+ *
+ *  A lookup, not a judgment: each key is a mechanism the platform reported, and
+ *  the sentence beside it says what an operator would do about it. An unmapped
+ *  reason renders verbatim rather than being dropped. */
+const UNKNOWN_WORDING: Record<string, string> = {
+  attribute_absent: 'the platform never recorded this value',
+  attribute_stale: 'the value is older than this rule will rely on',
+  evidence_unverified: 'the rule requires corroborating evidence that is absent or stale',
+  coverage_gap: 'the camera was not fully observing this area',
+  capability_gap: 'no loaded model can produce this value here',
+  subject_not_observed: 'no matching subject was observed',
+  value_unparseable: 'the recorded value cannot be compared against this rule',
+};
+
+function ComplianceBadge({ state }: { state: ComplianceState }) {
+  return (
+    <Box
+      component="span"
+      sx={{
+        px: 0.9,
+        py: 0.2,
+        borderRadius: 0.75,
+        fontFamily: mono,
+        fontSize: '0.68rem',
+        letterSpacing: '0.09em',
+        fontWeight: 700,
+        color: COMPLIANCE_TONE[state],
+        border: `1px solid ${COMPLIANCE_TONE[state]}55`,
+        bgcolor: `${COMPLIANCE_TONE[state]}14`,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {COMPLIANCE_WORD[state]}
+    </Box>
+  );
+}
+
+/**
+ * One finding, with the conditions it rests on.
+ *
+ * Every condition is shown, not only the failing ones. A reviewer asking "what
+ * did it actually see?" should not have to re-query the platform, and a passing
+ * condition on a surprising value is how a rule bug is found.
+ */
+function FindingCard({ finding }: { finding: Finding }) {
+  return (
+    <Box
+      sx={{
+        p: 1.25,
+        borderRadius: 1.5,
+        border: `1px solid ${brand.border}`,
+        borderLeft: `3px solid ${COMPLIANCE_TONE[finding.state]}`,
+      }}
+    >
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
+        <Typography sx={{ fontWeight: 650, fontSize: '0.95rem' }}>
+          {finding.subject.label || finding.subject.object_id}
+        </Typography>
+        <ComplianceBadge state={finding.state} />
+        {finding.severity ? (
+          <Typography variant="caption" sx={{ fontFamily: mono }}>
+            {finding.severity}
+          </Typography>
+        ) : null}
+      </Stack>
+
+      {/* The end-user sentence. Assembled by the rule engine from the rule
+          document's own wording — not generated by a model, which is why a
+          stored finding regenerates it identically. */}
+      <Typography sx={{ fontSize: '1.02rem', lineHeight: 1.5, mb: 0.75 }}>
+        {finding.sentence}
+      </Typography>
+
+      <Stack spacing={0.35}>
+        {finding.conditions.map((condition, index) => (
+          <Stack
+            key={`${condition.attribute_key}-${index}`}
+            direction="row"
+            spacing={1}
+            alignItems="baseline"
+            sx={{ flexWrap: 'wrap' }}
+          >
+            <Typography sx={{ fontFamily: mono, fontSize: '0.74rem', minWidth: 168 }}>
+              {condition.satisfied === true ? '✓' : condition.satisfied === false ? '✗' : '?'}{' '}
+              {condition.attribute_key}
+            </Typography>
+            <Typography variant="caption">
+              {condition.satisfied === null
+                ? UNKNOWN_WORDING[condition.unknown_reason ?? ''] ??
+                  condition.unknown_reason ??
+                  'could not be established'
+                : `observed ${JSON.stringify(condition.observed)} · rule wants ${condition.operator} ${JSON.stringify(condition.expected)}`}
+            </Typography>
+          </Stack>
+        ))}
+      </Stack>
+
+      {/* Traceability. The rule and version are what make a verdict appealable;
+          the evidence handle is what makes it checkable. */}
+      <Stack direction="row" spacing={2} sx={{ mt: 1, flexWrap: 'wrap' }}>
+        <Trace label="rule" value={`${finding.rule_id}@${finding.rule_version}`} />
+        <Trace label="ruleset" value={finding.ruleset_version} />
+        <Trace label="object" value={finding.subject.object_id} />
+        {finding.evidence_refs[0] ? (
+          <Trace label="evidence" value={finding.evidence_refs[0]} />
+        ) : null}
+        {finding.coverage_fraction < 1 ? (
+          <Trace label="coverage" value={finding.coverage_fraction.toFixed(3)} />
+        ) : null}
+      </Stack>
+    </Box>
+  );
+}
+
+/**
+ * The compliance section of a frame card.
+ *
+ * Findings are filtered to the objects present in *this* frame, so the panel
+ * describes the moment on screen rather than the whole session.
+ */
+function FrameCompliance({
+  findings,
+  status,
+}: {
+  findings: Finding[];
+  status: ComplianceStatus | null;
+}) {
+  if (status && !status.enabled) {
+    return (
+      <Typography variant="caption" sx={{ fontStyle: 'italic' }}>
+        No rules are loaded, so nothing was evaluated. That is different from
+        finding nothing wrong — set COMPLIANCE_RULES to a rule document to
+        enable evaluation.
+      </Typography>
+    );
+  }
+  if (findings.length === 0) {
+    return (
+      <Typography variant="caption" sx={{ fontStyle: 'italic' }}>
+        No rule covers the objects in this frame. A rule applies to the subject
+        classes it names, and reports nothing about anything else.
+      </Typography>
+    );
+  }
+  return (
+    <Stack spacing={1}>
+      {findings.map((finding) => (
+        <FindingCard key={finding.finding_id} finding={finding} />
+      ))}
+    </Stack>
   );
 }
 
