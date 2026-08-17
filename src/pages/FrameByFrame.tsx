@@ -1022,6 +1022,11 @@ const UNKNOWN_WORDING: Record<string, string> = {
   capability_gap: 'no loaded model can produce this value here',
   subject_not_observed: 'no matching subject was observed',
   value_unparseable: 'the recorded value cannot be compared against this rule',
+  // The one a reviewer sees most on real footage. Worded as what happened
+  // rather than as a verdict: the platform looked and the body part was not in
+  // the picture, which is a different fact from the equipment being absent and
+  // must never be read as one.
+  not_observable: 'the platform looked and could not see this well enough to judge',
 };
 
 function ComplianceBadge({ state }: { state: ComplianceState }) {

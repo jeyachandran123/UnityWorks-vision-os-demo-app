@@ -382,6 +382,7 @@ export type ComplianceState = 'compliant' | 'violation' | 'unknown' | 'not_appli
  * translates one of these into a verdict.
  */
 export type UnknownReason =
+  | 'not_observable'
   | 'attribute_absent'
   | 'attribute_stale'
   | 'evidence_unverified'
